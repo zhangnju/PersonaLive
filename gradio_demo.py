@@ -3,6 +3,12 @@ PersonaLive Gradio Demo
 支持摄像头实时输入和参考图片，生成实时数字人
 """
 
+# ── 兼容性补丁：huggingface_hub >= 0.28 移除了 cached_download ──────────────
+import huggingface_hub as _hf_hub
+if not hasattr(_hf_hub, "cached_download"):
+    _hf_hub.cached_download = _hf_hub.hf_hub_download
+# ─────────────────────────────────────────────────────────────────────────────
+
 import os
 import sys
 import time

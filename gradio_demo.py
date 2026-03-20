@@ -83,7 +83,7 @@ def _infer_worker():
                     return
         if not _ref_loaded:
             continue
-        batch = torch.cat(frames, dim=0).to(pipe.device)
+        batch = torch.cat(frames, dim=0).to(device=pipe.device, dtype=pipe.dtype)
         try:
             output = pipe.process_input(batch)          # (4, H, W, 3) [0,1]
             for frame_np in output:
@@ -97,6 +97,8 @@ def _infer_worker():
                         pass
                     _output_q.put_nowait(out_img)
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"[Infer Error] {e}")
 
 

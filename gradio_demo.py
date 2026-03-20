@@ -37,6 +37,7 @@ _ref_loaded = False
 
 _input_q: queue.Queue = queue.Queue(maxsize=32)
 _output_q: queue.Queue = queue.Queue(maxsize=64)
+_preview_q: queue.Queue = queue.Queue(maxsize=8)   # 原始采集帧预览
 
 _infer_stop = threading.Event()
 _infer_thread = None
@@ -82,7 +83,7 @@ def _infer_worker():
                     return
         if not _ref_loaded:
             continue
-        batch = torch.cat(frames, dim=0)
+        batch = torch.cat(frames, dim=0).to(pipe.device)
         try:
             output = pipe.process_input(batch)          # (4, H, W, 3) [0,1]
             for frame_np in output:
@@ -133,6 +134,16 @@ def _capture_worker(source):
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_resized = cv2.resize(frame_rgb, (TARGET_W, TARGET_H))
+
+        # 推预览队列（保持队列只存最新帧）
+        try:
+            _preview_q.put_nowait(frame_resized)
+        except queue.Full:
+            try:
+                _preview_q.get_nowait()
+            except queue.Empty:
+                pass
+            _preview_q.put_nowait(frame_resized)
 
         t = torch.from_numpy(frame_resized).float() / 127.5 - 1.0   # [-1,1]
         t = t.permute(2, 0, 1).unsqueeze(0)                          # (1,C,H,W)
@@ -187,7 +198,7 @@ def start_capture(cam_source_str):
     global _cap_thread
 
     if not _ref_loaded:
-        yield None, "❌ 请先加载参考图片"
+        yield None, None, "❌ 请先加载参考图片"
         return
 
     # 停止旧采集线程
@@ -197,6 +208,7 @@ def start_capture(cam_source_str):
     _cap_stop.clear()
     _clear_queue(_input_q)
     _clear_queue(_output_q)
+    _clear_queue(_preview_q)
 
     # 解析输入源
     source = cam_source_str.strip()
@@ -207,17 +219,25 @@ def start_capture(cam_source_str):
     _cap_thread.start()
     _ensure_infer_thread()
 
-    last_frame = None
+    last_out = None
+    last_preview = None
     while not _cap_stop.is_set():
+        # 取最新预览帧
+        while not _preview_q.empty():
+            try:
+                last_preview = _preview_q.get_nowait()
+            except queue.Empty:
+                break
+
+        # 取最新输出帧
         try:
-            frame_np = _output_q.get(timeout=0.1)   # numpy (H,W,3) uint8
-            last_frame = frame_np
-            yield frame_np, "🟢 生成中..."
+            last_out = _output_q.get(timeout=0.05)
+            yield last_preview, last_out, "🟢 生成中..."
         except queue.Empty:
-            if last_frame is not None:
-                yield last_frame, "🟡 等待帧..."
+            if last_preview is not None or last_out is not None:
+                yield last_preview, last_out, "🟡 等待推理..."
             else:
-                yield None, "🟡 等待推理..."
+                yield None, None, "🟡 等待推理..."
 
 
 def stop_capture():
@@ -225,7 +245,8 @@ def stop_capture():
     _cap_stop.set()
     _clear_queue(_input_q)
     _clear_queue(_output_q)
-    return None, "⏹ 已停止"
+    _clear_queue(_preview_q)
+    return None, None, "⏹ 已停止"
 
 
 def process_video_file(video_path, ref_image):
@@ -319,16 +340,25 @@ with gr.Blocks(title="基于AMD ROCm的实时数字人生成Demo", theme=gr.them
                         start_btn = gr.Button("▶ 开始采集", variant="primary")
                         stop_btn  = gr.Button("⏹ 停止", variant="stop")
 
-                # 右列：输出
+                # 中列：摄像头原始输入预览
+                with gr.Column(scale=2):
+                    live_in = gr.Image(
+                        label="摄像头输入",
+                        type="numpy",
+                        height=460,
+                    )
+
+                # 右列：数字人输出
                 with gr.Column(scale=2):
                     live_out = gr.Image(
                         label="数字人输出",
                         type="numpy",
-                        height=500,
+                        height=460,
                     )
-                    live_status = gr.Textbox(
-                        label="采集状态", value="", interactive=False
-                    )
+
+            live_status = gr.Textbox(
+                label="采集状态", value="", interactive=False
+            )
 
             load_btn.click(
                 fn=load_reference,
@@ -338,11 +368,11 @@ with gr.Blocks(title="基于AMD ROCm的实时数字人生成Demo", theme=gr.them
             start_btn.click(
                 fn=start_capture,
                 inputs=[cam_source],
-                outputs=[live_out, live_status],
+                outputs=[live_in, live_out, live_status],
             )
             stop_btn.click(
                 fn=stop_capture,
-                outputs=[live_out, live_status],
+                outputs=[live_in, live_out, live_status],
             )
 
         # ── Tab 2: 离线视频 ────────────────────────────────────────────────────
